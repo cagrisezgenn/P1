@@ -1,0 +1,3 @@
+Study,Ref,N,Inputs,Targets,Validation,Metric_R2,Uncertainty,LeakageCheck
+Previous Work A,1,40,Process,Strength,-,0.85,-,No
+Previous Work B,2,40,Composition,Hardness,-,0.78,-,No
