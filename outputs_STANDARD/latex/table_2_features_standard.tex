@@ -1,0 +1,30 @@
+% DEBUG/DIAGNOSTIC (STANDARD MODE)
+\begin{tabular}{l l p{8cm}}
+\toprule
+Feature Name & Unit & Description \\
+\midrule
+Pressure_MPa & MPa & Sintering Pressure \\
+Sinter_Temp_C & C & Sintering Temperature \\
+Sinter_Time_min & min & Sintering Duration \\
+MA_Time_h & h & Mechanical Alloying Time \\
+Layer_Count_from_code & - & Number of discrete layers (1,3,5,7) \\
+Mxene_Rate_from_code & wt% & Ti3C2Tx additive content \\
+Is_FGM & Binary & 1 if Functionally Graded, 0 if Homogeneous \\
+B4C_Outer_wt & wt% & Boron Carbide content at outer surface \\
+B4C_Center_wt & wt% & Boron Carbide content at center core \\
+B4C_Mean_wt & wt% & Volume-averaged B4C content across layers \\
+B4C_Gradient_wt & wt% & Gradient magnitude (Outer - Center) \\
+Layer1_B4C_Rate & wt% & B4C content in Layer 1 \\
+Layer2_B4C_Rate & wt% & B4C content in Layer 2 \\
+Layer3_B4C_Rate & wt% & B4C content in Layer 3 \\
+Layer4_B4C_Rate & wt% & B4C content in Layer 4 \\
+Layer5_B4C_Rate & wt% & B4C content in Layer 5 \\
+Layer6_B4C_Rate & wt% & B4C content in Layer 6 \\
+Layer7_B4C_Rate & wt% & B4C content in Layer 7 \\
+Pressure_x_Temp & Index & Interaction: Pressure * Temperature \\
+Temp_x_Time & Index & Interaction: Temperature * Time \\
+Sinter_Energy & Index & Proxy for total energy input \\
+Layer_Complexity & Index & Interaction: Layer Count * Gradient \\
+Green_Density_g_cm3 & g/cm3 & Density before sintering (In-Process) \\
+\bottomrule
+\end{tabular}
