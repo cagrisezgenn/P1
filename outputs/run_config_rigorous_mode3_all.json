@@ -1,0 +1,45 @@
+{
+  "VERSION_STAMP": "2026-02-05_rev_lock_01",
+  "config_summary": {
+    "VALIDATION_MODE": "RIGOROUS",
+    "RUN_TARGETS": [
+      "Hardness_HB"
+    ],
+    "RUN_OPTUNA": true,
+    "RUN_ENSEMBLES": true,
+    "RIGOROUS_FINAL_MODEL_POLICY": "STACKING",
+    "STEP7_DATA_SLICE_MODE": 3
+  },
+  "R2_IMPROVEMENTS": {
+    "STEP_1_ENABLE_FEATURES": true,
+    "STEP_2_OPTIMUM_DEVIATION": true,
+    "STEP_3_MXENE_REGIME": true,
+    "STEP_4_QC_INCLUSIVE_THRESHOLD": false,
+    "STEP_5_DENSITY_HAT": true,
+    "STEP_6_OUTLIER_DOWNWEIGHT": true,
+    "STEP_7_DATA_SLICE": true
+  },
+  "mode": "RIGOROUS",
+  "split_mode": "nested_cv",
+  "n_outer": 5,
+  "n_inner": 3,
+  "n_trials": 200,
+  "n_perm": 0,
+  "seed": 42,
+  "timestamp": "2026-02-08T23:51:38.277957",
+  "ENABLE_ABLATION": false,
+  "ENABLE_LIT_TABLE": false,
+  "REQUIRE_PDFLATEX_FOR_FIG1": false,
+  "SHAP_STRICT": true,
+  "enable_raw_scatter_plots": false,
+  "enable_samplewise_table": true,
+  "raw_scatter_features_by_target": {},
+  "samplewise_table_top_n": 10,
+  "ARTIFACT_SUFFIX": "rigorous_mode3_all",
+  "run_targets_raw": [
+    "Hardness_HB"
+  ],
+  "run_targets": [
+    "Hardness_HB"
+  ]
+}

@@ -22,7 +22,11 @@ import subprocess
 import traceback
 from contextlib import contextmanager
 
-VERSION_STAMP = "2026-02-03 16:11 REV#HARDENING"
+VERSION_STAMP = "2026-02-05_rev_lock_01"
+
+# DEBUG_IMPORT diagnostic to prevent old-copy confusion
+import os as _os_diag
+print(f"[DEBUG_IMPORT] Figure_Table={_os_diag.path.abspath(__file__)}")
 
 # Constants needed for plotting (can be imported or redefined if simple)
 TARGETS = ['Max_Compressive_Strength_MPa', 'Hardness_HB', 'Sintered_Density_g_cm3', 'Toughness_MJ_m3']
@@ -107,6 +111,21 @@ class ArtifactGenerator:
             self.run_config = run_config
             self.artifact_suffix = str(run_config.get('ARTIFACT_SUFFIX', self.artifact_suffix)).lower()
 
+    def _targets_to_run(self, models):
+        if not models:
+            msg = "[ARTIFACT_ERROR] models is empty; nothing to generate."
+            self.log(msg)
+            raise RuntimeError(msg)
+        targets_to_run = [t for t in TARGETS if t in models]
+        if not targets_to_run:
+            msg = "[ARTIFACT_ERROR] No valid targets in models dict. Cannot generate artifacts."
+            self.log(msg)
+            raise RuntimeError(msg)
+        return targets_to_run
+
+    def _filter_by_targets(self, d: dict, targets_to_run: list[str]) -> dict:
+        return {k: v for k, v in (d or {}).items() if k in set(targets_to_run)}
+
     def _target_slug(self, target):
         return TARGET_SHORT_NAMES.get(target, target).lower()
 
@@ -114,13 +133,27 @@ class ArtifactGenerator:
         base, ext = os.path.splitext(name)
         return f"{base}_{self.artifact_suffix}{ext}"
 
+    def _norm_rel_path(self, p: str) -> str:
+        """Normalize relative path to forward slashes for OS-independent comparison."""
+        if p is None:
+            return ""
+        p = str(p)
+        p = p.replace("\\", "/")
+        while "//" in p:
+            p = p.replace("//", "/")
+        if p.startswith("./"):
+            p = p[2:]
+        return p.strip("/")
+
     def _register_expected(self, rel_path):
-        if rel_path not in self.expected_files:
-            self.expected_files.append(rel_path)
+        norm = self._norm_rel_path(rel_path)
+        if norm and norm not in self.expected_files:
+            self.expected_files.append(norm)
 
     def _register_skipped(self, rel_path):
-        if rel_path not in self.skipped_files:
-            self.skipped_files.append(rel_path)
+        norm = self._norm_rel_path(rel_path)
+        if norm and norm not in self.skipped_files:
+            self.skipped_files.append(norm)
 
     def _log_artifact_ok(self, path):
         try:
@@ -169,17 +202,27 @@ class ArtifactGenerator:
         candidates = [c for c in df_qc.columns if c not in excludes and pd.api.types.is_numeric_dtype(df_qc[c])]
         return candidates[:4] # Return first 4
 
-    def plot_raw_physical_scatters(self, df_qc, final_df=None, run_config=None):
+    def plot_raw_physical_scatters(self, df_qc, models, final_df=None, run_config=None):
         """Generates raw data scatter plots (Physical Trend Graphs)"""
         self.log("  Plotting Raw Physical Trend Graphs...")
         
-        for target in TARGETS:
+        targets_to_run = self._targets_to_run(models)
+        for target in targets_to_run:
             if target not in df_qc.columns:
-                continue
+                msg = f"[ARTIFACT_ERROR] Missing target column in df_qc: {target}"
+                self.log(msg)
+                raise RuntimeError(msg)
                 
             x_feats = self._resolve_raw_scatter_features(df_qc, target)
             if not x_feats:
-                continue
+                msg = f"[ARTIFACT_ERROR] No raw scatter features for target: {target}"
+                self.log(msg)
+                raise RuntimeError(msg)
+            missing_feats = [f for f in x_feats if f not in df_qc.columns]
+            if missing_feats:
+                msg = f"[ARTIFACT_ERROR] Missing raw scatter features for target={target}: {missing_feats}"
+                self.log(msg)
+                raise RuntimeError(msg)
                 
             slug = self._target_slug(target)
             fname = self._with_suffix(f"raw_scatter_{slug}.pdf")
@@ -191,8 +234,6 @@ class ArtifactGenerator:
             axes = axes.flatten()
             
             for i, feat in enumerate(x_feats):
-                if feat not in df_qc.columns:
-                    continue
                 ax = axes[i]
                 # Plot All Data (from df_qc which has all phases)
                 sns.scatterplot(data=df_qc, x=feat, y=target, hue='Phase', style='Phase', ax=ax, alpha=0.7)
@@ -221,7 +262,8 @@ class ArtifactGenerator:
         self.log(f"  Exporting Sample-wise Prediction Table (Top {top_n})...")
         
         frames = []
-        for target in models:
+        targets_to_run = self._targets_to_run(models)
+        for target in targets_to_run:
             info = models[target]
             
             # Support both OOF key styles
@@ -235,13 +277,18 @@ class ArtifactGenerator:
                         'y_pred': info['oof_y_pred']
                     }
             
-            if not oof_data or 'y_pred' not in oof_data:
-                self.log(f"    Warning: No OOF data for {target}, skipping table export.")
-                continue
+            if not oof_data or 'y_pred' not in oof_data or 'y_true' not in oof_data or 'indices' not in oof_data:
+                msg = f"[ARTIFACT_ERROR] Missing OOF data for target={target} in samplewise table."
+                self.log(msg)
+                raise RuntimeError(msg)
 
             indices = oof_data['indices']
             y_true = oof_data['y_true']
             y_pred = oof_data['y_pred']
+            if len(indices) == 0 or len(y_true) == 0 or len(y_pred) == 0 or len(y_true) != len(y_pred) or len(indices) != len(y_true):
+                msg = f"[ARTIFACT_ERROR] Invalid OOF lengths for target={target} in samplewise table. indices={len(indices)} y_true={len(y_true)} y_pred={len(y_pred)}"
+                self.log(msg)
+                raise RuntimeError(msg)
             
             # Create DataFrame
             df_res = pd.DataFrame({
@@ -332,27 +379,64 @@ class ArtifactGenerator:
         self._log_artifact_ok(path)
         return path
 
-    def _write_manifest(self):
+    def _write_manifest(self, models=None):
+        """Write artifact manifest with VERSION_STAMP and model metadata.
+        
+        Args:
+            models: Dict of model info by target (optional). If provided, extracts
+                   final_report_model_algo based on validation mode.
+        """
         produced_files = []
-        for key in ['04_figures', 'latex']:
+        # Ensure 03_tables exists in dirs
+        if self.dirs.get('03_tables') is None:
+            out_03 = os.path.join(self._output_root, '03_tables')
+            os.makedirs(out_03, exist_ok=True)
+            self.dirs['03_tables'] = out_03
+
+        for key in ['04_figures', 'latex', '03_tables']:
             root = self.dirs.get(key)
             if not root or not os.path.exists(root):
                 continue
             for fname in os.listdir(root):
-                rel = os.path.join(key, fname)
-                produced_files.append(rel)
+                abs_path = os.path.join(root, fname)
+                if os.path.isfile(abs_path):
+                    rel = os.path.join(key, fname)
+                    norm = self._norm_rel_path(rel)
+                    if norm:
+                        produced_files.append(norm)
 
-        missing_files = [
-            f for f in self.expected_files
-            if f not in produced_files and f not in self.skipped_files
-        ]
+        # Normalize all sets for comparison
+        expected_norm = {self._norm_rel_path(p) for p in self.expected_files}
+        produced_norm = set(produced_files)
+        skipped_norm = {self._norm_rel_path(p) for p in self.skipped_files}
 
+        missing_files = sorted(expected_norm - produced_norm - skipped_norm)
+
+        # Build manifest with version and model metadata
         manifest = {
-            'expected_files': sorted(self.expected_files),
-            'produced_files': sorted(produced_files),
-            'missing_files': sorted(missing_files),
-            'skipped_files': sorted(self.skipped_files)
+            'VERSION_STAMP': VERSION_STAMP,
+            'validation_mode': self.validation_mode,
+            'expected_files': sorted(expected_norm),
+            'produced_files': sorted(produced_norm),
+            'missing_files': missing_files,
+            'skipped_files': sorted(skipped_norm)
         }
+        
+        # Add R2_IMPROVEMENTS tracking from run_config
+        if self.run_config and 'R2_IMPROVEMENTS' in self.run_config:
+            r2_improvements = self.run_config['R2_IMPROVEMENTS']
+            manifest['R2_IMPROVEMENTS'] = r2_improvements
+            # Derive active steps (keys where value == True)
+            manifest['R2_ACTIVE_STEPS'] = [k for k, v in r2_improvements.items() if v is True]
+        
+        # Add final_report_model_algo if models provided
+        if models:
+            final_report_model_algo = {}
+            for target, info in models.items():
+                algo = info.get('algo', 'UNKNOWN')
+                final_report_model_algo[target] = algo
+            manifest['final_report_model_algo'] = final_report_model_algo
+        
         manifest_path = os.path.join(self._output_root, f"artifact_manifest_{self.artifact_suffix}.json")
         with open(manifest_path, 'w') as f:
             json.dump(manifest, f, indent=2)
@@ -403,7 +487,7 @@ class ArtifactGenerator:
         plt.rcParams['figure.constrained_layout.use'] = False
         plt.rcParams['figure.autolayout'] = False
 
-    def plot_boxplots(self, df, mode='input'):
+    def plot_boxplots(self, df, mode='input', models=None):
         """Generates distribution boxplots"""
         self.log(f"  Plotting {mode} distributions...")
         
@@ -413,7 +497,17 @@ class ArtifactGenerator:
             fname = self._with_suffix("input_distributions.pdf")
             title = "Input Feature Distributions"
         else:
-            cols = [c for c in TARGETS if c in df.columns]
+            if models is None:
+                msg = "[ARTIFACT_ERROR] models is required for target boxplots."
+                self.log(msg)
+                raise RuntimeError(msg)
+            targets_to_run = self._targets_to_run(models)
+            missing = [t for t in targets_to_run if t not in df.columns]
+            if missing:
+                msg = f"[ARTIFACT_ERROR] Missing target columns for boxplots: {missing}"
+                self.log(msg)
+                raise RuntimeError(msg)
+            cols = [c for c in targets_to_run if c in df.columns]
             fname = self._with_suffix("target_distributions.pdf")
             title = "Target Variable Distributions"
             
@@ -599,38 +693,66 @@ class ArtifactGenerator:
         self._set_run_config(run_config)
         self._set_plot_style()
         self.log("Generating Advanced Plots (Vector/Literature Style) via Figure_Table.py...")
+        
+        targets_to_run = self._targets_to_run(models)
 
         # 1. Distributions & Correlation
         if run_vector_plots and df_qc is not None:
             self.plot_boxplots(df_qc, mode='input')
-            self.plot_boxplots(df_qc, mode='target')
+            self.plot_boxplots(df_qc, mode='target', models=models)
             self.plot_correlation_matrix(df_qc)
             
             # Raw Physical Scatter Plots
             if self.run_config.get("enable_raw_scatter_plots", True):
-                self.plot_raw_physical_scatters(df_qc, final_df=final_df, run_config=self.run_config)
+                self.plot_raw_physical_scatters(df_qc, models=models, final_df=final_df, run_config=self.run_config)
 
         # 2. Model-Based Plots
-        for target in TARGETS:
-            if target not in models:
-                continue
-
-            info = models[target]
-            model = info['best_model']
-            feature_set = info['feature_set']
-            feature_names = info['feature_names']
+        for target in targets_to_run:
+            info = models.get(target)
+            if not info:
+                msg = f"[ARTIFACT_ERROR] Missing model info for target={target}"
+                self.log(msg)
+                raise RuntimeError(msg)
+            model = info.get('best_model')
+            feature_set = info.get('feature_set')
+            feature_names = info.get('feature_names')
+            if model is None or not feature_set or not feature_names:
+                msg = f"[ARTIFACT_ERROR] Missing model/feature_set/feature_names for target={target}"
+                self.log(msg)
+                raise RuntimeError(msg)
 
             X_all = feature_sets.get(feature_set)
             if X_all is None or X_all.empty:
-                continue
+                msg = f"[ARTIFACT_ERROR] Missing feature set '{feature_set}' for target={target}"
+                self.log(msg)
+                raise RuntimeError(msg)
+            missing_feats = [f for f in feature_names if f not in X_all.columns]
+            if missing_feats:
+                msg = f"[ARTIFACT_ERROR] Missing features for target={target}: {missing_feats}"
+                self.log(msg)
+                raise RuntimeError(msg)
 
-            if info.get('oof', {}).get('indices') is not None:
-                idx = info['oof']['indices']
+            oof = info.get('oof', {})
+            if oof.get('indices') is not None:
+                idx = oof.get('indices')
+                y_true = oof.get('y_true')
+                if y_true is None:
+                    msg = f"[ARTIFACT_ERROR] Missing oof.y_true for target={target}"
+                    self.log(msg)
+                    raise RuntimeError(msg)
             else:
+                if final_df is None or target not in final_df.columns:
+                    msg = f"[ARTIFACT_ERROR] Missing final_df column for target={target}"
+                    self.log(msg)
+                    raise RuntimeError(msg)
                 idx = final_df.index[final_df[target].notna()]
+                y_true = final_df.loc[idx, target].to_numpy()
 
             X = X_all.loc[idx, feature_names]
-            y_true = info.get('oof', {}).get('y_true', final_df.loc[idx, target].to_numpy())
+            if len(X) == 0 or len(y_true) == 0 or len(X) != len(y_true):
+                msg = f"[ARTIFACT_ERROR] Invalid X/y lengths for target={target} X={len(X)} y={len(y_true)}"
+                self.log(msg)
+                raise RuntimeError(msg)
 
             slug = self._target_slug(target)
 
@@ -677,24 +799,43 @@ class ArtifactGenerator:
     def plot_permutation_hist(self, models):
         """Generates Permutation Test Null Distribution Plots"""
         self.log("  Plotting Permutation Test Histograms...")
+        
+        if self.run_config is not None and int(self.run_config.get('n_perm', 0)) <= 0:
+            self.log("  Permutation tests disabled (n_perm=0). Skipping permutation histograms.")
+            return
+        
+        targets_to_run = self._targets_to_run(models)
 
-        for target in TARGETS:
-            if target not in models:
-                continue
-            perm = models[target].get('perm_test', {})
-            scores_raw = perm.get('perm_scores', '[]')
-            if not scores_raw:
-                continue
+        for target in targets_to_run:
+            info = models.get(target)
+            if not info:
+                msg = f"[ARTIFACT_ERROR] Missing model info for target={target}"
+                self.log(msg)
+                raise RuntimeError(msg)
+            perm = info.get('perm_test', None)
+            if not perm:
+                msg = f"[ARTIFACT_ERROR] Missing perm_test for target={target}"
+                self.log(msg)
+                raise RuntimeError(msg)
+            scores_raw = perm.get('perm_scores', None)
+            if scores_raw is None or scores_raw == '':
+                msg = f"[ARTIFACT_ERROR] Missing perm_scores for target={target}"
+                self.log(msg)
+                raise RuntimeError(msg)
             if isinstance(scores_raw, str):
                 try:
                     scores = json.loads(scores_raw)
-                except Exception:
-                    scores = []
+                except Exception as e:
+                    msg = f"[ARTIFACT_ERROR] Invalid perm_scores JSON for target={target}: {e}"
+                    self.log(msg)
+                    raise RuntimeError(msg)
             else:
                 scores = scores_raw
 
             if not scores:
-                continue
+                msg = f"[ARTIFACT_ERROR] Empty perm_scores for target={target}"
+                self.log(msg)
+                raise RuntimeError(msg)
 
             obs_score = perm.get('original_score', 0)
             p_val = perm.get('p_value', 1.0)
@@ -742,29 +883,57 @@ class ArtifactGenerator:
     def plot_feature_importance(self, models, feature_sets, final_df):
         """Generates Feature Importance Plots (Permutation Importance on OOF)"""
         self.log("  Plotting Feature Importance...")
+        
+        targets_to_run = self._targets_to_run(models)
 
-        for t in TARGETS:
-            if t not in models:
-                continue
-            info = models[t]
-            model = info['best_model']
-            feature_set = info['feature_set']
-            feature_names = info['feature_names']
+        for t in targets_to_run:
+            info = models.get(t)
+            if not info:
+                msg = f"[ARTIFACT_ERROR] Missing model info for target={t}"
+                self.log(msg)
+                raise RuntimeError(msg)
+            model = info.get('best_model')
+            feature_set = info.get('feature_set')
+            feature_names = info.get('feature_names')
+            if model is None or not feature_set or not feature_names:
+                msg = f"[ARTIFACT_ERROR] Missing model/feature_set/feature_names for target={t}"
+                self.log(msg)
+                raise RuntimeError(msg)
             X_all = feature_sets.get(feature_set)
             if X_all is None or X_all.empty:
-                continue
+                msg = f"[ARTIFACT_ERROR] Missing feature set '{feature_set}' for target={t}"
+                self.log(msg)
+                raise RuntimeError(msg)
+            missing_feats = [f for f in feature_names if f not in X_all.columns]
+            if missing_feats:
+                msg = f"[ARTIFACT_ERROR] Missing features for target={t}: {missing_feats}"
+                self.log(msg)
+                raise RuntimeError(msg)
 
-            if info.get('oof', {}).get('indices') is not None:
-                idx = info['oof']['indices']
-                y = info['oof']['y_true']
+            oof = info.get('oof', {})
+            if oof.get('indices') is not None:
+                idx = oof.get('indices')
+                y = oof.get('y_true')
+                if y is None:
+                    msg = f"[ARTIFACT_ERROR] Missing oof.y_true for target={t}"
+                    self.log(msg)
+                    raise RuntimeError(msg)
             else:
+                if final_df is None or t not in final_df.columns:
+                    msg = f"[ARTIFACT_ERROR] Missing final_df column for target={t}"
+                    self.log(msg)
+                    raise RuntimeError(msg)
                 idx = final_df.index[final_df[t].notna()]
                 y = final_df.loc[idx, t].to_numpy()
 
             X = X_all.loc[idx, feature_names]
+            if len(X) == 0 or len(y) == 0 or len(X) != len(y):
+                msg = f"[ARTIFACT_ERROR] Invalid X/y lengths for target={t} X={len(X)} y={len(y)}"
+                self.log(msg)
+                raise RuntimeError(msg)
             self.plot_feature_importance_single(model, X, y, t)
 
-    def generate_table_1_stats(self, df_qc):
+    def generate_table_1_stats(self, df_qc, models):
         """Generates Table 1: Dataset Summary Statistics"""
         self.log("  Generating Table 1 (Dataset Summary)...")
         
@@ -787,7 +956,13 @@ class ArtifactGenerator:
             'Toughness_MJ_m3': 'Toughness (MJ/m3)'
         }
         
-        cols = input_cols + TARGETS
+        targets_to_run = self._targets_to_run(models)
+        missing_targets = [t for t in targets_to_run if t not in df_qc.columns]
+        if missing_targets:
+            msg = f"[ARTIFACT_ERROR] Missing target columns for Table 1: {missing_targets}"
+            self.log(msg)
+            raise RuntimeError(msg)
+        cols = input_cols + targets_to_run
         valid_cols = [c for c in cols if c in df_qc.columns]
         
         stats = []
@@ -922,54 +1097,86 @@ class ArtifactGenerator:
         pass # The logic in generate_final_artifacts is currently scatter only. 
              # We should update generate_final_artifacts to add error bars if available.
              
-    def plot_optuna_history(self, studies):
+    def plot_optuna_history(self, studies, models):
         """Generates Figure 9: Optuna Optimization History"""
         self.log("  Plotting Optuna History (Figure 9)...")
-        if not studies: return
+        targets_to_run = self._targets_to_run(models)
+        studies_filtered = self._filter_by_targets(studies, targets_to_run)
+        if not studies_filtered:
+            self.log("  No Optuna studies available for selected targets. Skipping.")
+            return
+        missing = [t for t in targets_to_run if t not in studies_filtered]
+        if missing:
+            msg = f"[ARTIFACT_ERROR] Missing Optuna studies for targets: {missing}"
+            self.log(msg)
+            raise RuntimeError(msg)
         
-        for t, study in studies.items():
+        for t in targets_to_run:
+            if t not in studies_filtered:
+                continue
+            study = studies_filtered.get(t)
             try:
                 # Extract history
-                if hasattr(study, 'trials_dataframe'):
-                    df_trials = study.trials_dataframe()
-                    # Filter completed
-                    df_trials = df_trials[df_trials['state'] == 'COMPLETE']
-                    if df_trials.empty: continue
+                if not hasattr(study, 'trials_dataframe'):
+                    msg = f"[ARTIFACT_ERROR] Optuna study missing trials_dataframe for target={t}"
+                    self.log(msg)
+                    raise RuntimeError(msg)
+                df_trials = study.trials_dataframe()
+                # Filter completed
+                df_trials = df_trials[df_trials['state'] == 'COMPLETE']
+                if df_trials.empty:
+                    msg = f"[ARTIFACT_ERROR] No completed Optuna trials for target={t}"
+                    self.log(msg)
+                    raise RuntimeError(msg)
                     
-                    # Plot
-                    plt.figure(figsize=(10, 6))
-                    plt.plot(df_trials['number'], df_trials['value'], 'o', color='lightblue', alpha=0.5, label='Trials')
-                    
-                    # Cummax line (Best so far)
-                    best_so_far = df_trials['value'].cummax()
-                    plt.plot(df_trials['number'], best_so_far, color='red', linewidth=2, label='Best So Far')
-                    
-                    plt.title(f"Optimization History: {TARGET_SHORT_NAMES.get(t, t)}")
-                    plt.xlabel("Trial Number")
-                    plt.ylabel("Validation R2 Score")
-                    plt.legend()
-                    plt.grid(True, linestyle=':', alpha=0.6)
-                    self._save_plot(self._with_suffix(f"optuna_history_{TARGET_SHORT_NAMES.get(t,t).lower()}.pdf"))
+                # Plot
+                plt.figure(figsize=(10, 6))
+                plt.plot(df_trials['number'], df_trials['value'], 'o', color='lightblue', alpha=0.5, label='Trials')
+                
+                # Cummax line (Best so far)
+                best_so_far = df_trials['value'].cummax()
+                plt.plot(df_trials['number'], best_so_far, color='red', linewidth=2, label='Best So Far')
+                
+                plt.title(f"Optimization History: {TARGET_SHORT_NAMES.get(t, t)}")
+                plt.xlabel("Trial Number")
+                plt.ylabel("Validation R2 Score")
+                plt.legend()
+                plt.grid(True, linestyle=':', alpha=0.6)
+                self._save_plot(self._with_suffix(f"optuna_history_{TARGET_SHORT_NAMES.get(t,t).lower()}.pdf"))
             except Exception as e:
-                self.log(f"    Could not plot Optuna history for {t}: {e}")
+                msg = f"[ARTIFACT_ERROR] Optuna history failed for target={t}: {e}"
+                self.log(msg)
+                raise RuntimeError(msg)
 
     def plot_outlier_index(self, models, feature_sets, final_df):
         """Generates Index vs Standardized Residual Plot to spot outlier samples"""
         self.log("  Plotting Outlier Index (Sample IDs)...")
         
-        for t in TARGETS:
-            if t not in models:
-                continue
-            info = models[t]
+        targets_to_run = self._targets_to_run(models)
+
+        for t in targets_to_run:
+            info = models.get(t)
+            if not info:
+                msg = f"[ARTIFACT_ERROR] Missing model info for target={t}"
+                self.log(msg)
+                raise RuntimeError(msg)
             oof = info.get('oof')
             if not oof:
-                continue
+                msg = f"[ARTIFACT_ERROR] Missing oof data for target={t}"
+                self.log(msg)
+                raise RuntimeError(msg)
 
             y_true = np.array(oof.get('y_true', []))
             y_pred = np.array(oof.get('y_pred', []))
             indices = oof.get('indices', [])
-            if len(y_true) == 0 or len(y_pred) == 0:
-                continue
+            if len(y_true) == 0 or len(y_pred) == 0 or len(y_true) != len(y_pred):
+                msg = f"[ARTIFACT_ERROR] Invalid oof lengths for target={t}: y_true={len(y_true)} y_pred={len(y_pred)}"
+                self.log(msg)
+                raise RuntimeError(msg)
+            if indices is None or len(indices) == 0 or len(indices) != len(y_true):
+                msg = f"[ARTIFACT_ERROR] Invalid oof indices for target={t}: indices={0 if indices is None else len(indices)} y_true={len(y_true)}"
+                self.log(msg)
+                raise RuntimeError(msg)
 
             if 'Sample_Code' in final_df.columns and len(indices) == len(y_true):
                 sample_codes = final_df.loc[indices, 'Sample_Code'].values
@@ -1006,18 +1213,32 @@ class ArtifactGenerator:
             return
 
         self.log("  Generating Table S1 (Fold Summary)...")
+        
+        targets_to_run = self._targets_to_run(models)
 
         fold_indices = None
-        for t in TARGETS:
-            info = models.get(t, {})
+        for t in targets_to_run:
+            info = models.get(t)
+            if not info:
+                msg = f"[ARTIFACT_ERROR] Missing model info for target={t}"
+                self.log(msg)
+                raise RuntimeError(msg)
             oof = info.get('oof', {})
-            if oof.get('fold_indices'):
+            if not oof or not oof.get('fold_indices'):
+                msg = f"[ARTIFACT_ERROR] Missing fold_indices for target={t}"
+                self.log(msg)
+                raise RuntimeError(msg)
+            if fold_indices is None:
                 fold_indices = oof.get('fold_indices')
-                break
+            elif len(oof.get('fold_indices')) != len(fold_indices):
+                msg = f"[ARTIFACT_ERROR] Inconsistent fold_indices length for target={t}"
+                self.log(msg)
+                raise RuntimeError(msg)
 
         if not fold_indices:
-            self.log("    ERROR: No fold indices available for Table S1.")
-            return
+            msg = "[ARTIFACT_ERROR] No fold indices available for Table S1."
+            self.log(msg)
+            raise RuntimeError(msg)
 
         stats = []
         for i, te_idx in enumerate(fold_indices):
@@ -1028,14 +1249,17 @@ class ArtifactGenerator:
             for k in [1, 3, 5, 7]:
                 row[f"{k}-L"] = int(counts.get(k, 0))
 
-            for t in TARGETS:
-                if t in te_data.columns:
-                    short = TARGET_SHORT_NAMES.get(t, t)
-                    row[f"{short}"] = f"{te_data[t].mean():.1f}"
+            for t in targets_to_run:
+                if t not in te_data.columns:
+                    msg = f"[ARTIFACT_ERROR] Missing target column in final_df for Table S1: {t}"
+                    self.log(msg)
+                    raise RuntimeError(msg)
+                short = TARGET_SHORT_NAMES.get(t, t)
+                row[f"{short}"] = f"{te_data[t].mean():.1f}"
             stats.append(row)
 
         df_folds = pd.DataFrame(stats)
-        cols = ['Fold', 'N_Test', '1-L', '3-L', '5-L', '7-L'] + [TARGET_SHORT_NAMES.get(t, t) for t in TARGETS]
+        cols = ['Fold', 'N_Test', '1-L', '3-L', '5-L', '7-L'] + [TARGET_SHORT_NAMES.get(t, t) for t in targets_to_run]
         cols = [c for c in cols if c in df_folds.columns]
         df_folds = df_folds[cols]
 
@@ -1080,14 +1304,21 @@ class ArtifactGenerator:
         df_lit = pd.read_csv(csv_path)
         rows = df_lit.to_dict('records')
 
-        if TARGETS[0] in models:
-            info = models[TARGETS[0]]
-            r2 = info.get('oof', {}).get('r2', 0)
-            metric_val = f"{r2:.2f}"
-            val_type = "Nested CV (5x3)" if self.validation_mode == 'RIGOROUS' else "Train/Test"
-        else:
-            metric_val = "-"
-            val_type = "-"
+        targets_to_run = self._targets_to_run(models)
+        ref_target = targets_to_run[0]
+        info = models.get(ref_target)
+        if not info:
+            msg = f"[ARTIFACT_ERROR] Missing model info for target={ref_target} in literature comparison."
+            self.log(msg)
+            raise RuntimeError(msg)
+        oof = info.get('oof', {})
+        if not oof or 'r2' not in oof:
+            msg = f"[ARTIFACT_ERROR] Missing oof.r2 for target={ref_target} in literature comparison."
+            self.log(msg)
+            raise RuntimeError(msg)
+        r2 = oof.get('r2', 0)
+        metric_val = f"{r2:.2f}"
+        val_type = "Nested CV (5x3)" if self.validation_mode == 'RIGOROUS' else "Train/Test"
 
         this_work = {
             "Ref": "This Work",
@@ -1159,18 +1390,26 @@ class ArtifactGenerator:
         """Generates Figure S2: Residual Diagnostics"""
         self.log("  Plotting Residual Diagnostics (Figure S2)...")
         
-        for t in TARGETS:
-            if t not in models:
-                continue
-            info = models[t]
+        targets_to_run = self._targets_to_run(models)
+
+        for t in targets_to_run:
+            info = models.get(t)
+            if not info:
+                msg = f"[ARTIFACT_ERROR] Missing model info for target={t}"
+                self.log(msg)
+                raise RuntimeError(msg)
             oof = info.get('oof')
             if not oof:
-                continue
+                msg = f"[ARTIFACT_ERROR] Missing oof data for target={t}"
+                self.log(msg)
+                raise RuntimeError(msg)
 
             y_true = np.array(oof.get('y_true', []))
             y_pred = np.array(oof.get('y_pred', []))
             if len(y_true) == 0 or len(y_true) != len(y_pred):
-                continue
+                msg = f"[ARTIFACT_ERROR] Invalid oof lengths for target={t}: y_true={len(y_true)} y_pred={len(y_pred)}"
+                self.log(msg)
+                raise RuntimeError(msg)
                 
             residuals = y_true - y_pred
             
@@ -1191,17 +1430,33 @@ class ArtifactGenerator:
             plt.tight_layout()
             self._save_plot(self._with_suffix(f"residual_diagnostics_{TARGET_SHORT_NAMES.get(t,t).lower()}.pdf"))
 
-    def generate_table_s2_params(self, best_params_, run_config):
+    def generate_table_s2_params(self, best_params_, run_config, models):
         """Generates Table S2: Hyperparameter Search Space & Best Params"""
         self.log("  Generating Table S2 (Hyperparameters)...")
-        if not best_params_: return
+        targets_to_run = self._targets_to_run(models)
+        filtered = self._filter_by_targets(best_params_, targets_to_run)
+        if not filtered:
+            self.log("  No best_params_ available for selected targets. Skipping Table S2.")
+            return
+        missing = [t for t in targets_to_run if t not in filtered]
+        if missing:
+            msg = f"[ARTIFACT_ERROR] Missing best_params_ for targets: {missing}"
+            self.log(msg)
+            raise RuntimeError(msg)
 
         trials = "-"
         if run_config is not None:
             trials = run_config.get('n_trials', "-")
         
         rows = []
-        for t, res in best_params_.items():
+        for t in targets_to_run:
+            if t not in filtered:
+                continue
+            res = filtered.get(t)
+            if res is None:
+                msg = f"[ARTIFACT_ERROR] Missing best_params_ entry for target={t}"
+                self.log(msg)
+                raise RuntimeError(msg)
             short = TARGET_SHORT_NAMES.get(t, t)
             algo = res.get('algorithm', '-')
             params = res.get('params', {})
@@ -1227,7 +1482,7 @@ class ArtifactGenerator:
 
         try:
             # Core tables and figures
-            self.generate_table_1_stats(df_qc)
+            self.generate_table_1_stats(df_qc, models)
             self.generate_table_2_features()
             self.generate_table_s1_folds(final_df, models)
             self.plot_permutation_hist(models)
@@ -1235,9 +1490,9 @@ class ArtifactGenerator:
 
             # Supplementary
             if best_params_:
-                self.generate_table_s2_params(best_params_, run_config)
+                self.generate_table_s2_params(best_params_, run_config, models)
             if studies:
-                self.plot_optuna_history(studies)
+                self.plot_optuna_history(studies, models)
 
             self.plot_residual_diagnostics(models)
             self.plot_outlier_index(models, feature_sets, final_df)
@@ -1271,7 +1526,8 @@ class ArtifactGenerator:
         self._set_run_config(run_config)
         self.log(f"Running Ablation Study ({self.validation_mode})...")
         is_rigorous = (self.validation_mode == 'RIGOROUS')
-        targets_ordered = list(TARGETS)
+        
+        targets_to_run = self._targets_to_run(models)
         
         sets_map = {
             'Core': 'core',
@@ -1281,10 +1537,17 @@ class ArtifactGenerator:
         
         final_table_rows = []
         
-        for t in targets_ordered:
-            if t not in models: continue
-            info = models[t]
-            model_tmpl = info['best_model']
+        for t in targets_to_run:
+            info = models.get(t)
+            if not info:
+                msg = f"[ARTIFACT_ERROR] Missing model info for target={t}"
+                self.log(msg)
+                raise RuntimeError(msg)
+            model_tmpl = info.get('best_model')
+            if model_tmpl is None:
+                msg = f"[ARTIFACT_ERROR] Missing best_model for target={t} in ablation study"
+                self.log(msg)
+                raise RuntimeError(msg)
             
             row = {'Property': TARGET_SHORT_NAMES[t]}
 
@@ -1342,19 +1605,26 @@ class ArtifactGenerator:
         self._set_run_config(run_config)
         self.log("  Running Calibration Analysis...")
         
-        for t in TARGETS:
-            if t not in models:
-                continue
-            info = models[t]
+        targets_to_run = self._targets_to_run(models)
+
+        for t in targets_to_run:
+            info = models.get(t)
+            if not info:
+                msg = f"[ARTIFACT_ERROR] Missing model info for target={t}"
+                self.log(msg)
+                raise RuntimeError(msg)
             oof = info.get('oof')
             if not oof:
-                continue
+                msg = f"[ARTIFACT_ERROR] Missing oof data for target={t}"
+                self.log(msg)
+                raise RuntimeError(msg)
 
             y_true = np.array(oof.get('y_true', []))
             y_pred = np.array(oof.get('y_pred', []))
             if len(y_true) == 0 or len(y_true) != len(y_pred):
-                self.log(f"    Skipping calibration for {t} due to length mismatch ({len(y_true)} vs {len(y_pred)})")
-                continue
+                msg = f"[ARTIFACT_ERROR] Invalid oof lengths for target={t}: y_true={len(y_true)} y_pred={len(y_pred)}"
+                self.log(msg)
+                raise RuntimeError(msg)
             
             plt.figure(figsize=(6, 6))
             plt.scatter(y_pred, y_true, alpha=0.5, edgecolor='k')
@@ -1370,20 +1640,34 @@ class ArtifactGenerator:
     def generate_final_artifacts(self, final_df, models, feature_sets, run_optuna, run_config):
         self._set_run_config(run_config)
         self.log("Generating Final Tables & Variables (via ArtifactGenerator)...")
+        
+        targets_to_run = self._targets_to_run(models)
 
-        # 1. Combined Parity
-        fig, axes = plt.subplots(2, 2, figsize=(14, 12))
-        axes = axes.flatten()
+        # 1. Combined Parity (dynamic grid based on targets_to_run count)
+        n_targets = len(targets_to_run)
+        n_cols = 2
+        n_rows = (n_targets + 1) // 2
+        fig, axes = plt.subplots(n_rows, n_cols, figsize=(14, 6 * n_rows))
+        # FIX: Ensure axes is always a flat 1D list for consistent indexing
+        axes = np.atleast_1d(axes).ravel().tolist()
 
-        for i, t in enumerate(TARGETS):
-            if t not in models:
-                continue
-            info = models[t]
+        for i, t in enumerate(targets_to_run):
+            info = models.get(t)
+            if not info:
+                msg = f"[ARTIFACT_ERROR] Missing model info for target={t}"
+                self.log(msg)
+                raise RuntimeError(msg)
             oof = info.get('oof', {})
+            if not oof or 'y_true' not in oof or 'y_pred' not in oof:
+                msg = f"[ARTIFACT_ERROR] Missing oof predictions for target={t}"
+                self.log(msg)
+                raise RuntimeError(msg)
             y_true = np.array(oof.get('y_true', []))
             y_pred = np.array(oof.get('y_pred', []))
             if len(y_true) == 0 or len(y_true) != len(y_pred):
-                continue
+                msg = f"[ARTIFACT_ERROR] Invalid oof lengths for target={t}: y_true={len(y_true)} y_pred={len(y_pred)}"
+                self.log(msg)
+                raise RuntimeError(msg)
 
             unit = TARGET_UNITS.get(TARGET_SHORT_NAMES.get(t, 'Val'), '')
             width = info.get('pi', {}).get('width', 0)
@@ -1399,6 +1683,10 @@ class ArtifactGenerator:
             dmax = max(y_true.max(), y_pred.max())
             axes[i].plot([dmin, dmax], [dmin, dmax], 'r--', lw=1.5, zorder=3)
 
+            if 'r2' not in oof or 'rmse' not in oof:
+                msg = f"[ARTIFACT_ERROR] Missing oof metrics for target={t}"
+                self.log(msg)
+                raise RuntimeError(msg)
             r2_val = oof.get('r2', 0)
             rmse_val = oof.get('rmse', 0)
             algo_name = info.get('algo', 'Unknown')
@@ -1414,15 +1702,19 @@ class ArtifactGenerator:
             axes[i].set_ylabel(f"Predicted ({unit})", fontsize=12)
             axes[i].grid(True, linestyle=':', alpha=0.6)
 
+        # Hide unused axes
+        for j in range(n_targets, len(axes)):
+            axes[j].axis('off')
+
         plt.tight_layout()
         self._save_plot(self._with_suffix("parity_plots.pdf"))
 
-        # 2. latex_variables.tex
+        # 2. latex_variables.tex (only for targets_to_run)
         content = "% Generated Variables\n"
         if self.validation_mode == 'STANDARD':
             content = "% DEBUG/DIAGNOSTIC (STANDARD MODE)\n" + content
 
-        for t in TARGETS:
+        for t in targets_to_run:
             short = TARGET_SHORT_NAMES[t].capitalize()
             if t == 'Max_Compressive_Strength_MPa': short = 'Strength'
             if t == 'Hardness_HB': short = 'Hardness'
@@ -1432,7 +1724,20 @@ class ArtifactGenerator:
             info = models.get(t, {})
             oof = info.get('oof', {})
             pi = info.get('pi', {})
-            p_val = info.get('perm_test', {}).get('p_value', 1.0)
+            if not oof or 'r2' not in oof or 'rmse' not in oof:
+                msg = f"[ARTIFACT_ERROR] Missing oof metrics for target={t} in latex variables"
+                self.log(msg)
+                raise RuntimeError(msg)
+            if not pi or 'coverage' not in pi or 'width' not in pi:
+                msg = f"[ARTIFACT_ERROR] Missing PI metrics for target={t} in latex variables"
+                self.log(msg)
+                raise RuntimeError(msg)
+            perm_test = info.get('perm_test', {})
+            if not perm_test or 'p_value' not in perm_test:
+                msg = f"[ARTIFACT_ERROR] Missing perm_test for target={t} in latex variables"
+                self.log(msg)
+                raise RuntimeError(msg)
+            p_val = perm_test.get('p_value', 1.0)
             p_str = "< 0.001" if p_val < 0.001 else f"{p_val:.3f}"
 
             content += f"\\newcommand{{\\{short}OOFR}}{{{oof.get('r2', 0):.2f}}}\n"
@@ -1446,15 +1751,28 @@ class ArtifactGenerator:
 
         self._write_text(self._with_suffix("latex_variables.tex"), content)
 
-        # 3. rigorous_results_table
+        # 3. rigorous_results_table (only for targets_to_run)
         tex = r"\begin{tabular}{lccccccc}" + "\n\\toprule\nTarget & Algo & RMSE & $R^2$ & PI Cov. & PI Width & $d$ & p-value \\\\\n\\midrule\n"
         notes = []
-        for t in TARGETS:
+        for t in targets_to_run:
             info = models.get(t, {})
             name = TARGET_SHORT_NAMES.get(t, t)
             oof = info.get('oof', {})
             pi = info.get('pi', {})
-            p_val = info.get('perm_test', {}).get('p_value', 1.0)
+            if not oof or 'r2' not in oof or 'rmse' not in oof:
+                msg = f"[ARTIFACT_ERROR] Missing oof metrics for target={t} in results table"
+                self.log(msg)
+                raise RuntimeError(msg)
+            if not pi or 'coverage' not in pi or 'width' not in pi:
+                msg = f"[ARTIFACT_ERROR] Missing PI metrics for target={t} in results table"
+                self.log(msg)
+                raise RuntimeError(msg)
+            perm_test = info.get('perm_test', {})
+            if not perm_test or 'p_value' not in perm_test:
+                msg = f"[ARTIFACT_ERROR] Missing perm_test for target={t} in results table"
+                self.log(msg)
+                raise RuntimeError(msg)
+            p_val = perm_test.get('p_value', 1.0)
             p_str = "< 0.001" if p_val < 0.001 else f"{p_val:.3f}"
             tex += f"{name} & {info.get('algo','-')} & {oof.get('rmse',0):.2f} & {oof.get('r2',0):.2f} & {pi.get('coverage',0):.2f} & {pi.get('width',0):.2f} & {info.get('cohens_d',0):.2f} & {p_str} \\\\\n"
             if info.get('flag_not_significant'):
@@ -1467,6 +1785,6 @@ class ArtifactGenerator:
         self._write_text(self._with_suffix("rigorous_results_table.tex"), tex)
 
         # Finalize manifest
-        missing = self._write_manifest()
+        missing = self._write_manifest(models=models)
         if missing:
             raise RuntimeError(f"Missing artifacts: {missing}")
